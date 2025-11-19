@@ -1,0 +1,28 @@
+=== GDSC1 Local DataLoader Test (Bag-of-Chars + Cell One-Hot) ===
+   
+Found local copy...
+Loading...
+Done!
+Input feature dimension (drug-vec + cell-onehot): 991
+
+Batch X shape: torch.Size([32, 991])   (batch_size, feature_dim)
+Batch Y shape: torch.Size([32])   (batch_size)
+
+=== First sample (x[0]) ===
+x[0] shape: torch.Size([991])
+y[0] value: 1.9671
+
+=== Feature Structure ===
+Drug feature vector (bag-of-chars) size: 33
+Cell line one-hot vector size:            958
+Total concatenated feature dim:           991
+
+x[0][:10] = tensor([0.0000, 0.1039, 0.1039, 0.0000, 0.0000, 0.0000, 0.0000, 0.0260, 0.0260,
+        0.0260])
+
+=== Dataset Sizes ===
+Train size: 124117
+Valid size: 17731
+Test size:  35462
+
+=== Test Completed Successfully ===

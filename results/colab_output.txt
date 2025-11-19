@@ -1,0 +1,28 @@
+Downloading...
+=== GDSC1 Colab DataLoader Test (RDKit ECFP + Cell One-Hot) ===
+
+100%|██████████| 140M/140M [00:06<00:00, 21.3MiB/s]
+Loading...
+Done!
+Input feature dimension (ECFP drug-fp + cell-onehot): 3006
+
+Batch X shape: torch.Size([32, 3006])   (batch_size, feature_dim)
+Batch Y shape: torch.Size([32])   (batch_size)
+
+=== First sample (x[0]) ===
+x[0] shape: torch.Size([3006])
+y[0] value: -0.0958
+
+=== Feature Structure ===
+Drug feature vector (RDKit ECFP) size: 2048
+Cell line one-hot vector size:         958
+Total concatenated feature dim:        3006
+
+x[0][:10] = tensor([0., 0., 0., 0., 0., 0., 0., 0., 0., 0.])
+
+=== Dataset Sizes ===
+Train size: 124117
+Valid size: 17731
+Test size:  35462
+
+=== RDKit DataLoader Test Completed Successfully ===
