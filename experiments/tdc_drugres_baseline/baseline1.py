@@ -56,7 +56,7 @@ class Config:
     batch_size: int = 128
     lr: float = 1e-3
     weight_decay: float = 1e-5
-    epochs: int = 15
+    epochs: int = 3
     val_size: float = 0.1
 
     # Runtime
@@ -249,9 +249,12 @@ def eval_epoch(model, loader, loss_fn, device) -> Tuple[float, float, float]:
 
     pred = torch.cat(preds, dim=0)
     target = torch.cat(targets, dim=0)
-    return (total / max(n, 1), rmse(pred, target), p
-::contentReference[oaicite:0]{index=0}
-earsonr(pred, target))
+    return (
+    total / max(n, 1),
+    rmse(pred, target),
+    pearsonr(pred, target),
+    )
+
 
 
 def main() -> None:
@@ -266,6 +269,9 @@ def main() -> None:
     # Load TDC data
     data = DrugRes(name=cfg.dataset_name)
     df = data.get_data()
+
+    # ---- laptop-safe subset ----
+    df = df.sample(n=20000, random_state=cfg.seed).reset_index(drop=True)
 
     smiles = df["Drug"].astype(str).tolist()
     y = df["Y"].astype(float).to_numpy()
@@ -291,12 +297,18 @@ def main() -> None:
     val_ds = DrugResDataset(ecfp[idx_val], cell_expr[idx_val], y[idx_val])
 
     train_loader = DataLoader(
-        train_ds, batch_size=cfg.batch_size, shuffle=True,
-        num_workers=cfg.num_workers, pin_memory=(cfg.device == "cuda")
+        train_ds,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        num_workers=cfg.num_workers,
+        pin_memory=(cfg.device == "cuda"),
     )
     val_loader = DataLoader(
-        val_ds, batch_size=cfg.batch_size, shuffle=False,
-        num_workers=cfg.num_workers, pin_memory=(cfg.device == "cuda")
+        val_ds,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        num_workers=cfg.num_workers,
+        pin_memory=(cfg.device == "cuda"),
     )
 
     # Model
@@ -319,10 +331,7 @@ def main() -> None:
 
         if val_rmse < best_val_rmse:
             best_val_rmse = val_rmse
-            torch.save(
-                {"model_state": model.state_dict(), "cfg": cfg.__dict__},
-                best_path
-            )
+            torch.save({"model_state": model.state_dict(), "cfg": cfg.__dict__}, best_path)
 
     metrics = {"best_val_rmse": best_val_rmse, "dataset": cfg.dataset_name}
     metrics_path = os.path.join(cfg.results_dir, cfg.metrics_file)
