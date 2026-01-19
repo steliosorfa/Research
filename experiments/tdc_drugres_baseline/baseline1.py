@@ -53,7 +53,7 @@ from sklearn.model_selection import train_test_split
 @dataclass
 class Config:
     # Experiment tagging
-    run_tag: str = "T0_baseline"
+    run_tag: str = "T1_GELU"
 
     dataset_name: str = "GDSC1"
 
@@ -144,11 +144,12 @@ class MLP(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, out_dim),
-            nn.ReLU(),
+            nn.GELU(),
         )
+        
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
