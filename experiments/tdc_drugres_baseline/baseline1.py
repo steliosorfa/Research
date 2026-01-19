@@ -53,7 +53,7 @@ from sklearn.model_selection import train_test_split
 @dataclass
 class Config:
     # Experiment tagging
-    run_tag: str = "T1_GELU"
+    run_tag: str = "T2_batchnorm"
 
     dataset_name: str = "GDSC1"
 
@@ -144,15 +144,18 @@ class MLP(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
-            nn.GELU(),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
             nn.Dropout(dropout),
+
             nn.Linear(hidden_dim, out_dim),
-            nn.GELU(),
+            nn.BatchNorm1d(out_dim),
+            nn.ReLU(),
         )
-        
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
 
 
 class DrugResBaseline(nn.Module):
