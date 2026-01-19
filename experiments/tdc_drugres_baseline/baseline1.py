@@ -4,14 +4,23 @@ Drug SMILES -> ECFP(2048) -> MLP -> z_drug
 Cell line gene expression vector -> MLP -> z_cell
 Fusion: concat([z_drug, z_cell]) -> head regression -> y_hat
 
-Outputs:
-- cache/gdsc1_ecfp2048_radius2.npz  (fingerprint cache)
-- results/tdc_drugres_baseline/best_model.pt
-- results/tdc_drugres_baseline/metrics.json
+Outputs (per run):
+- results/tdc_drugres_baseline/<run_id>/
+    - best_model.pt
+    - run_metrics.json
+    - history.csv
+    - cell_standardization_stats.npz
+    - loss_curve.png
+    - rmse_curve.png
+    - pearson_curve.png
+    - pred_vs_true.png
+
+Cache:
+- cache/gdsc1_ecfp2048_radius2.npz
 
 Run:
   conda activate tdc-drugres
-  python experiments/tdc_drugres_baseline/baseline_gdsc1_mlp.py
+  python experiments/tdc_drugres_baseline/baseline1.py
 """
 
 from __future__ import annotations
@@ -19,13 +28,17 @@ from __future__ import annotations
 import os
 import json
 import random
+import time
+import csv
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+
+import matplotlib.pyplot as plt
 
 from rdkit import Chem
 from rdkit.Chem import AllChem, DataStructs
@@ -39,6 +52,9 @@ from sklearn.model_selection import train_test_split
 # ----------------------------
 @dataclass
 class Config:
+    # Experiment tagging
+    run_tag: str = "T0_baseline"
+
     dataset_name: str = "GDSC1"
 
     # Features
@@ -67,13 +83,15 @@ class Config:
     num_workers: int = 0  # keep 0 on laptop
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # Data subset (laptop-safe); set to None for full
+    subset_n: int | None = 20000
+
     # Paths (relative to repo root)
     cache_dir: str = "cache"
     fp_cache_file: str = "gdsc1_ecfp2048_radius2.npz"
 
     results_dir: str = "results/tdc_drugres_baseline"
     best_ckpt: str = "best_model.pt"
-    metrics_file: str = "metrics.json"
 
 
 # ----------------------------
@@ -109,7 +127,7 @@ class DrugResDataset(Dataset):
         self.y = y.astype(np.float32)
 
     def __len__(self) -> int:
-        return self.y.shape[0]
+        return int(self.y.shape[0])
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x_drug = torch.from_numpy(self.ecfp[idx])
@@ -207,7 +225,7 @@ def build_or_load_ecfp_cache(cfg: Config, smiles_list: List[str]) -> np.ndarray:
 
 
 # ----------------------------
-# Train / Eval
+# Train / Eval / Predict
 # ----------------------------
 def train_one_epoch(model, loader, opt, loss_fn, device) -> float:
     model.train()
@@ -254,18 +272,91 @@ def eval_epoch(model, loader, loss_fn, device) -> Tuple[float, float, float]:
     pred = torch.cat(preds, dim=0)
     target = torch.cat(targets, dim=0)
     return (
-    total / max(n, 1),
-    rmse(pred, target),
-    pearsonr(pred, target),
+        total / max(n, 1),
+        rmse(pred, target),
+        pearsonr(pred, target),
     )
 
 
+@torch.no_grad()
+def predict(model, loader, device) -> Tuple[np.ndarray, np.ndarray]:
+    model.eval()
+    preds, targets = [], []
+    for x_drug, x_cell, y in loader:
+        x_drug = x_drug.to(device)
+        x_cell = x_cell.to(device)
+        y_hat = model(x_drug, x_cell).detach().cpu().view(-1)
+        preds.append(y_hat)
+        targets.append(y.detach().cpu().view(-1))
+    return torch.cat(preds).numpy(), torch.cat(targets).numpy()
 
+
+# ----------------------------
+# Plotting helpers
+# ----------------------------
+def save_learning_plots(history: List[Dict[str, Any]], run_dir: str) -> None:
+    epochs = [h["epoch"] for h in history]
+    train_loss = [h["train_loss"] for h in history]
+    val_loss = [h["val_loss"] for h in history]
+    val_rmse = [h["val_rmse"] for h in history]
+    val_p = [h["val_pearson"] for h in history]
+
+    plt.figure()
+    plt.plot(epochs, train_loss, label="train_loss")
+    plt.plot(epochs, val_loss, label="val_loss")
+    plt.xlabel("epoch")
+    plt.ylabel("loss")
+    plt.legend()
+    plt.tight_layout()
+    path = os.path.join(run_dir, "loss_curve.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.plot(epochs, val_rmse, label="val_RMSE")
+    plt.xlabel("epoch")
+    plt.ylabel("RMSE")
+    plt.legend()
+    plt.tight_layout()
+    path = os.path.join(run_dir, "rmse_curve.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+    plt.figure()
+    plt.plot(epochs, val_p, label="val_Pearson")
+    plt.xlabel("epoch")
+    plt.ylabel("Pearson")
+    plt.legend()
+    plt.tight_layout()
+    path = os.path.join(run_dir, "pearson_curve.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+def save_pred_scatter(y_true: np.ndarray, y_pred: np.ndarray, run_dir: str) -> None:
+    plt.figure()
+    plt.scatter(y_true, y_pred, s=8)
+    plt.xlabel("y_true")
+    plt.ylabel("y_pred")
+    plt.tight_layout()
+    path = os.path.join(run_dir, "pred_vs_true.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+# ----------------------------
+# Main
+# ----------------------------
 def main() -> None:
     cfg = Config()
     seed_everything(cfg.seed)
 
     os.makedirs(cfg.results_dir, exist_ok=True)
+
+    run_id = f"{cfg.run_tag}_{time.strftime('%Y%m%d_%H%M%S')}"
+    run_dir = os.path.join(cfg.results_dir, run_id)
+    os.makedirs(run_dir, exist_ok=True)
+    print("Run dir:", run_dir)
 
     device = torch.device(cfg.device)
     print("Device:", device)
@@ -274,8 +365,9 @@ def main() -> None:
     data = DrugRes(name=cfg.dataset_name)
     df = data.get_data()
 
-    # ---- laptop-safe subset ----
-    df = df.sample(n=20000, random_state=cfg.seed).reset_index(drop=True)
+    # Optional subset (laptop-safe)
+    if cfg.subset_n is not None:
+        df = df.sample(n=cfg.subset_n, random_state=cfg.seed).reset_index(drop=True)
 
     smiles = df["Drug"].astype(str).tolist()
     y = df["Y"].astype(float).to_numpy()
@@ -300,17 +392,16 @@ def main() -> None:
     # ---- train-only standardization of cell expression (no leakage) ----
     train_mean = cell_expr[idx_train].mean(axis=0, keepdims=True)
     train_std = cell_expr[idx_train].std(axis=0, keepdims=True)
-    train_std[train_std < 1e-8] = 1.0  # avoid div-by-zero
-
+    train_std[train_std < 1e-8] = 1.0
     cell_expr = (cell_expr - train_mean) / train_std
 
     np.savez_compressed(
-    os.path.join(cfg.results_dir, "cell_standardization_stats.npz"),
-    mean=train_mean.astype(np.float32),
-    std=train_std.astype(np.float32),
-)
+        os.path.join(run_dir, "cell_standardization_stats.npz"),
+        mean=train_mean.astype(np.float32),
+        std=train_std.astype(np.float32),
+    )
 
-
+    # Datasets / loaders
     train_ds = DrugResDataset(ecfp[idx_train], cell_expr[idx_train], y[idx_train])
     val_ds = DrugResDataset(ecfp[idx_val], cell_expr[idx_val], y[idx_val])
 
@@ -335,12 +426,27 @@ def main() -> None:
     loss_fn = nn.MSELoss()
 
     best_val_rmse = float("inf")
-    best_path = os.path.join(cfg.results_dir, cfg.best_ckpt)
+    best_epoch = -1
+    best_path = os.path.join(run_dir, cfg.best_ckpt)
 
+    history: List[Dict[str, Any]] = []
     pat = 0
+
     for epoch in range(1, cfg.epochs + 1):
         tr_loss = train_one_epoch(model, train_loader, opt, loss_fn, device)
         val_loss, val_rmse, val_p = eval_epoch(model, val_loader, loss_fn, device)
+
+        current_lr = float(opt.param_groups[0]["lr"])
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": float(tr_loss),
+                "val_loss": float(val_loss),
+                "val_rmse": float(val_rmse),
+                "val_pearson": float(val_p),
+                "lr": current_lr,
+            }
+        )
 
         print(
             f"Epoch {epoch:02d}/{cfg.epochs} | "
@@ -350,6 +456,7 @@ def main() -> None:
 
         if val_rmse < best_val_rmse - cfg.min_delta:
             best_val_rmse = val_rmse
+            best_epoch = epoch
             pat = 0
             torch.save({"model_state": model.state_dict(), "cfg": cfg.__dict__}, best_path)
         else:
@@ -358,13 +465,41 @@ def main() -> None:
                 print(f"Early stopping at epoch {epoch} (no val_RMSE improvement).")
                 break
 
-    metrics = {"best_val_rmse": best_val_rmse, "dataset": cfg.dataset_name}
-    metrics_path = os.path.join(cfg.results_dir, cfg.metrics_file)
-    with open(metrics_path, "w") as f:
-        json.dump(metrics, f, indent=2)
+    # Save history CSV
+    hist_path = os.path.join(run_dir, "history.csv")
+    with open(hist_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
+        writer.writeheader()
+        writer.writerows(history)
+    print("Saved history:", hist_path)
 
-    print(f"Saved best checkpoint: {best_path}")
-    print(f"Saved metrics: {metrics_path}")
+    # Save plots
+    save_learning_plots(history, run_dir)
+
+    # Load best checkpoint and do val scatter
+    ckpt = torch.load(best_path, map_location=device)
+    model.load_state_dict(ckpt["model_state"])
+    y_pred, y_true = predict(model, val_loader, device)
+    save_pred_scatter(y_true=y_true, y_pred=y_pred, run_dir=run_dir)
+
+    # Save run summary JSON
+    run_metrics = {
+        "run_id": run_id,
+        "dataset": cfg.dataset_name,
+        "n_samples": int(len(df)),
+        "best_val_rmse": float(best_val_rmse),
+        "best_epoch": int(best_epoch),
+        "seed": int(cfg.seed),
+        "device": str(device),
+        "cfg": cfg.__dict__,
+    }
+    run_metrics_path = os.path.join(run_dir, "run_metrics.json")
+    with open(run_metrics_path, "w") as f:
+        json.dump(run_metrics, f, indent=2)
+    print("Saved run metrics:", run_metrics_path)
+
+    print("Saved best checkpoint:", best_path)
+    print("Saved plots in:", run_dir)
 
 
 if __name__ == "__main__":
