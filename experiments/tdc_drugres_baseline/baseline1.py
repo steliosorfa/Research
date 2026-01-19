@@ -56,8 +56,12 @@ class Config:
     batch_size: int = 128
     lr: float = 1e-3
     weight_decay: float = 1e-5
-    epochs: int = 3
+    epochs: int = 15
     val_size: float = 0.1
+
+    # Early stopping
+    patience: int = 3
+    min_delta: float = 1e-4
 
     # Runtime
     num_workers: int = 0  # keep 0 on laptop
@@ -319,6 +323,7 @@ def main() -> None:
     best_val_rmse = float("inf")
     best_path = os.path.join(cfg.results_dir, cfg.best_ckpt)
 
+    pat = 0
     for epoch in range(1, cfg.epochs + 1):
         tr_loss = train_one_epoch(model, train_loader, opt, loss_fn, device)
         val_loss, val_rmse, val_p = eval_epoch(model, val_loader, loss_fn, device)
@@ -329,9 +334,15 @@ def main() -> None:
             f"val_RMSE={val_rmse:.4f} | val_Pearson={val_p:.4f}"
         )
 
-        if val_rmse < best_val_rmse:
+        if val_rmse < best_val_rmse - cfg.min_delta:
             best_val_rmse = val_rmse
+            pat = 0
             torch.save({"model_state": model.state_dict(), "cfg": cfg.__dict__}, best_path)
+        else:
+            pat += 1
+            if pat >= cfg.patience:
+                print(f"Early stopping at epoch {epoch} (no val_RMSE improvement).")
+                break
 
     metrics = {"best_val_rmse": best_val_rmse, "dataset": cfg.dataset_name}
     metrics_path = os.path.join(cfg.results_dir, cfg.metrics_file)
