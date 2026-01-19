@@ -53,7 +53,7 @@ from sklearn.model_selection import train_test_split
 @dataclass
 class Config:
     # Experiment tagging
-    run_tag: str = "T2_batchnorm"
+    run_tag: str = "T7_lr_3e-4" 
 
     dataset_name: str = "GDSC1"
 
@@ -70,7 +70,7 @@ class Config:
     # Training
     seed: int = 42
     batch_size: int = 128
-    lr: float = 5e-4
+    lr: float = 3e-4
     weight_decay: float = 1e-5
     epochs: int = 15
     val_size: float = 0.1
@@ -439,8 +439,9 @@ def main() -> None:
     for epoch in range(1, cfg.epochs + 1):
         tr_loss = train_one_epoch(model, train_loader, opt, loss_fn, device)
         val_loss, val_rmse, val_p = eval_epoch(model, val_loader, loss_fn, device)
+        
 
-        current_lr = float(opt.param_groups[0]["lr"])
+        current_lr = opt.param_groups[0]["lr"]
         history.append(
             {
                 "epoch": epoch,
@@ -452,6 +453,7 @@ def main() -> None:
             }
         )
 
+        current_lr = opt.param_groups[0]["lr"]
         print(
             f"Epoch {epoch:02d}/{cfg.epochs} | "
             f"train_loss={tr_loss:.4f} | val_loss={val_loss:.4f} | "
