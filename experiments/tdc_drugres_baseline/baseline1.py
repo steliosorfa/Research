@@ -54,7 +54,7 @@ class Config:
     # Training
     seed: int = 42
     batch_size: int = 128
-    lr: float = 1e-3
+    lr: float = 5e-4
     weight_decay: float = 1e-5
     epochs: int = 15
     val_size: float = 0.1
@@ -296,6 +296,20 @@ def main() -> None:
     idx_train, idx_val = train_test_split(
         idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
     )
+
+    # ---- train-only standardization of cell expression (no leakage) ----
+    train_mean = cell_expr[idx_train].mean(axis=0, keepdims=True)
+    train_std = cell_expr[idx_train].std(axis=0, keepdims=True)
+    train_std[train_std < 1e-8] = 1.0  # avoid div-by-zero
+
+    cell_expr = (cell_expr - train_mean) / train_std
+
+    np.savez_compressed(
+    os.path.join(cfg.results_dir, "cell_standardization_stats.npz"),
+    mean=train_mean.astype(np.float32),
+    std=train_std.astype(np.float32),
+)
+
 
     train_ds = DrugResDataset(ecfp[idx_train], cell_expr[idx_train], y[idx_train])
     val_ds = DrugResDataset(ecfp[idx_val], cell_expr[idx_val], y[idx_val])
