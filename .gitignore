@@ -1,16 +1,17 @@
-# editor
-.vscode/
-
-# caches
+# experiment outputs
+results/
 cache/
+
+# model artifacts
+*.pt
+*.pth
+
+# python
 __pycache__/
 *.pyc
 
-# data
-data/*.pkl
+# editor
+.vscode/
 
-# experiment outputs
-results/tdc_drugres_baseline/
-*.pt
-*.pth
-*.json
+# datasets
+data/
