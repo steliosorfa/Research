@@ -53,7 +53,7 @@ from sklearn.model_selection import train_test_split
 @dataclass
 class Config:
     # Experiment tagging
-    run_tag: str = "T7_lr_3e-4" 
+    run_tag: str = "T8_zdim128" 
 
     dataset_name: str = "GDSC1"
 
@@ -62,7 +62,7 @@ class Config:
     ecfp_radius: int = 2
 
     # Model dims
-    z_dim: int = 256
+    z_dim: int = 128
     drug_hidden: int = 512
     cell_hidden: int = 1024
     dropout: float = 0.1
