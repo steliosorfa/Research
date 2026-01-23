@@ -53,7 +53,7 @@ from sklearn.model_selection import train_test_split
 @dataclass
 class Config:
     # Experiment tagging
-    run_tag: str = "T8_zdim128" 
+    run_tag: str = "batch_size_64" 
 
     dataset_name: str = "GDSC1"
 
@@ -64,12 +64,12 @@ class Config:
     # Model dims
     z_dim: int = 128
     drug_hidden: int = 512
-    cell_hidden: int = 1024
+    cell_hidden: int = 2048
     dropout: float = 0.1
 
     # Training
     seed: int = 42
-    batch_size: int = 128
+    batch_size: int = 64
     lr: float = 3e-4
     weight_decay: float = 1e-5
     epochs: int = 15
