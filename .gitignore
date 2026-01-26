@@ -2,6 +2,9 @@
 results/
 cache/
 
+# but keep png plots anywhere under results
+!results/**/*.png
+
 # model artifacts
 *.pt
 *.pth
