@@ -44,7 +44,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, DataStructs
 from tdc.multi_pred import DrugRes
 
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GroupShuffleSplit 
 
 
 # ----------------------------
@@ -53,7 +53,7 @@ from sklearn.model_selection import train_test_split
 @dataclass
 class Config:
     # Experiment tagging
-    run_tag: str ="optimized_regularized_lr_scheduler"
+    run_tag: str ="held_out_seendrugs"
 
     dataset_name: str = "GDSC1"
 
@@ -372,10 +372,32 @@ def main() -> None:
     print(f"Total samples available: {len(df)}")
 
     # Split (do this BEFORE feature selection to avoid leakage)
+    # idx = np.arange(len(df))
+    #idx_train, idx_val = train_test_split(
+     #   idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
+    #)
+    # ----------------------------
+    # Split: LEAVE-DRUG-OUT (blind drugs)
+    # ----------------------------
     idx = np.arange(len(df))
-    idx_train, idx_val = train_test_split(
-        idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
-    )
+
+    # group id per sample = Drug_ID (ή "Drug" αν θες)
+    groups = df["Drug_ID"].astype(str).to_numpy()
+
+    gss = GroupShuffleSplit(n_splits=1, test_size=cfg.val_size, random_state=cfg.seed)
+    train_idx, val_idx = next(gss.split(idx, y=None, groups=groups))
+
+    idx_train = idx[train_idx]
+    idx_val   = idx[val_idx]
+
+    # sanity checks: no overlap of drugs
+    train_drugs = set(groups[idx_train])
+    val_drugs   = set(groups[idx_val])
+    overlap = train_drugs.intersection(val_drugs)
+    print(f"[Split] Train samples: {len(idx_train)} | Val samples: {len(idx_val)}")
+    print(f"[Split] Unique drugs train: {len(train_drugs)} | val: {len(val_drugs)} | overlap: {len(overlap)}")
+    assert len(overlap) == 0, "Leave-Drug-Out violated: same Drug_ID appears in train and val!"
+
 
     print("Estimating gene variance using a random TRAIN subset (to save RAM)...")
     train_subset_size = 10000
@@ -512,7 +534,13 @@ def main() -> None:
     # Final Metrics
     run_metrics = {
         "run_id": run_id,
+        "split_mode": "leave_drug_out",
+        "group_key": "Drug_ID",
         "n_samples": int(len(df)),
+        "n_train": int(len(idx_train)),
+        "n_val": int(len(idx_val)),
+        "n_drugs_train": int(len(train_drugs)),
+        "n_drugs_val": int(len(val_drugs)),
         "best_val_rmse": float(best_val_rmse),
         "best_epoch": int(best_epoch),
         "cfg": cfg.__dict__,
