@@ -53,7 +53,7 @@ from sklearn.model_selection import train_test_split
 @dataclass
 class Config:
     # Experiment tagging
-    run_tag: str = "batch_size_64" 
+    run_tag: str ="optimized_regularized_lr_scheduler"
 
     dataset_name: str = "GDSC1"
 
@@ -63,28 +63,28 @@ class Config:
 
     # Model dims
     z_dim: int = 128
-    drug_hidden: int = 512
-    cell_hidden: int = 2048
-    dropout: float = 0.1
+    drug_hidden: int = 256
+    cell_hidden: int = 256
+    dropout: float = 0.4
 
     # Training
     seed: int = 42
-    batch_size: int = 64
-    lr: float = 3e-4
-    weight_decay: float = 1e-5
-    epochs: int = 15
+    batch_size: int = 128
+    lr: float = 5e-4
+    weight_decay: float = 1e-4
+    epochs: int = 50
     val_size: float = 0.1
 
     # Early stopping
-    patience: int = 3
+    patience: int = 8
     min_delta: float = 1e-4
 
     # Runtime
-    num_workers: int = 0  # keep 0 on laptop
+    num_workers: int = 4  # keep 0 on laptop
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Data subset (laptop-safe); set to None for full
-    subset_n: int | None = 20000
+    subset_n: int | None = None
 
     # Paths (relative to repo root)
     cache_dir: str = "cache"
@@ -353,47 +353,86 @@ def save_pred_scatter(y_true: np.ndarray, y_pred: np.ndarray, run_dir: str) -> N
 # ----------------------------
 def main() -> None:
     cfg = Config()
+    # OVERRIDE: Use full dataset (memory-safe mode)
+    cfg.subset_n = None
     seed_everything(cfg.seed)
 
     os.makedirs(cfg.results_dir, exist_ok=True)
-
     run_id = f"{cfg.run_tag}_{time.strftime('%Y%m%d_%H%M%S')}"
     run_dir = os.path.join(cfg.results_dir, run_id)
     os.makedirs(run_dir, exist_ok=True)
-    print("Run dir:", run_dir)
 
     device = torch.device(cfg.device)
-    print("Device:", device)
+    print(f"Run dir: {run_dir}")
 
-    # Load TDC data
+    # 1. Load Data Frame (Pandas is efficient)
+    print("Loading FULL GDSC1 dataset...")
     data = DrugRes(name=cfg.dataset_name)
     df = data.get_data()
+    print(f"Total samples available: {len(df)}")
 
-    # Optional subset (laptop-safe)
-    if cfg.subset_n is not None:
-        df = df.sample(n=cfg.subset_n, random_state=cfg.seed).reset_index(drop=True)
+    # 2. OPTIMIZED FEATURE SELECTION (Prevents "Killed" error)
+    print("Estimating gene variance using a random subset (to save RAM)...")
+    
+    # Take a random 10,000 samples to find the best genes
+    subset_indices = np.random.choice(len(df), size=10000, replace=False)
+    subset_expr = np.array(df.iloc[subset_indices]["Cell Line"].tolist(), dtype=np.float32)
+    
+    # Calculate variance on this small chunk
+    gene_variances = np.var(subset_expr, axis=0)
+    
+    # Pick Top 1000 Genes
+    TOP_K = 1000
+    top_indices = np.argsort(gene_variances)[-TOP_K:]
+    top_indices = np.sort(top_indices)
+    print(f"Selected top {TOP_K} genes based on variance.")
+    
+    # Free memory immediately
+    del subset_expr
+    import gc; gc.collect()
 
+    # 3. Load the full dataset efficiently
+    print("Loading full dataset with selected genes...")
+    
+    # We load the raw list first (Pandas handles this fine)
+    full_expr_list = df["Cell Line"].tolist()
+    
+    n_samples = len(df)
+    # Create the final array with only 1000 columns (Small & Fast)
+    cell_expr = np.zeros((n_samples, TOP_K), dtype=np.float32)
+    
+    # Process in batches to keep RAM usage flat
+    batch_size = 10000
+    for i in range(0, n_samples, batch_size):
+        end = min(i + batch_size, n_samples)
+        # Convert only a small chunk to numpy
+        batch_arr = np.array(full_expr_list[i:end], dtype=np.float32)
+        # Keep only the good genes
+        cell_expr[i:end] = batch_arr[:, top_indices]
+        
+        if i % 50000 == 0:
+            print(f"Processed {i}/{n_samples} samples...")
+            
+    print(f"Final Cell expr shape: {cell_expr.shape}")
+    
+    # Cleanup big list
+    del full_expr_list
+    gc.collect()
+
+    # 4. Standard Setup continues...
     smiles = df["Drug"].astype(str).tolist()
     y = df["Y"].astype(float).to_numpy()
-
-    # Cell Line column is already a list-like expression vector
-    cell_expr = np.array(df["Cell Line"].tolist(), dtype=np.float32)
-    if cell_expr.ndim != 2:
-        raise RuntimeError(f"Cell expr must be 2D; got shape {cell_expr.shape}")
-
-    print("N samples:", len(df))
-    print("Cell expr dim:", cell_expr.shape[1])
-
+    
     # ECFP cache
     ecfp = build_or_load_ecfp_cache(cfg, smiles)
 
-    # Split indices
+    # Split
     idx = np.arange(len(df))
     idx_train, idx_val = train_test_split(
         idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
     )
 
-    # ---- train-only standardization of cell expression (no leakage) ----
+    # Standardization
     train_mean = cell_expr[idx_train].mean(axis=0, keepdims=True)
     train_std = cell_expr[idx_train].std(axis=0, keepdims=True)
     train_std[train_std < 1e-8] = 1.0
@@ -405,60 +444,55 @@ def main() -> None:
         std=train_std.astype(np.float32),
     )
 
-    # Datasets / loaders
+    # Datasets
     train_ds = DrugResDataset(ecfp[idx_train], cell_expr[idx_train], y[idx_train])
     val_ds = DrugResDataset(ecfp[idx_val], cell_expr[idx_val], y[idx_val])
 
     train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        num_workers=cfg.num_workers,
-        pin_memory=(cfg.device == "cuda"),
+        train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers
     )
     val_loader = DataLoader(
-        val_ds,
-        batch_size=cfg.batch_size,
-        shuffle=False,
-        num_workers=cfg.num_workers,
-        pin_memory=(cfg.device == "cuda"),
+        val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers
     )
 
-    # Model
-    model = DrugResBaseline(drug_in=cfg.ecfp_bits, cell_in=cell_expr.shape[1], cfg=cfg).to(device)
+    # Model & Optimizer
+    # Note: cell_in is automatically 1000 now
+    model = DrugResBaseline(drug_in=cfg.ecfp_bits, cell_in=TOP_K, cfg=cfg).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    
+    # Scheduler
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt, mode='min', factor=0.5, patience=3
+    )
+    
     loss_fn = nn.MSELoss()
 
+    # Training Loop
     best_val_rmse = float("inf")
     best_epoch = -1
-    best_path = os.path.join(run_dir, cfg.best_ckpt)
-
     history: List[Dict[str, Any]] = []
     pat = 0
+    best_path = os.path.join(run_dir, cfg.best_ckpt)
 
     for epoch in range(1, cfg.epochs + 1):
         tr_loss = train_one_epoch(model, train_loader, opt, loss_fn, device)
         val_loss, val_rmse, val_p = eval_epoch(model, val_loader, loss_fn, device)
         
+        # Step scheduler
+        scheduler.step(val_loss)
 
         current_lr = opt.param_groups[0]["lr"]
-        history.append(
-            {
-                "epoch": epoch,
-                "train_loss": float(tr_loss),
-                "val_loss": float(val_loss),
-                "val_rmse": float(val_rmse),
-                "val_pearson": float(val_p),
-                "lr": current_lr,
-            }
-        )
-
-        current_lr = opt.param_groups[0]["lr"]
-        print(
-            f"Epoch {epoch:02d}/{cfg.epochs} | "
-            f"train_loss={tr_loss:.4f} | val_loss={val_loss:.4f} | "
-            f"val_RMSE={val_rmse:.4f} | val_Pearson={val_p:.4f}"
-        )
+        
+        print(f"Epoch {epoch:02d}/{cfg.epochs} | train_loss={tr_loss:.4f} | val_loss={val_loss:.4f} | val_RMSE={val_rmse:.4f} | val_Pearson={val_p:.4f}")
+        
+        history.append({
+            "epoch": epoch, 
+            "train_loss": tr_loss, 
+            "val_loss": val_loss, 
+            "val_rmse": val_rmse, 
+            "val_pearson": val_p,
+            "lr": current_lr
+        })
 
         if val_rmse < best_val_rmse - cfg.min_delta:
             best_val_rmse = val_rmse
@@ -468,45 +502,37 @@ def main() -> None:
         else:
             pat += 1
             if pat >= cfg.patience:
-                print(f"Early stopping at epoch {epoch} (no val_RMSE improvement).")
+                print(f"Early stopping at epoch {epoch}")
                 break
 
-    # Save history CSV
-    hist_path = os.path.join(run_dir, "history.csv")
-    with open(hist_path, "w", newline="") as f:
+    # Save results
+    with open(os.path.join(run_dir, "history.csv"), "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
         writer.writeheader()
         writer.writerows(history)
-    print("Saved history:", hist_path)
 
-    # Save plots
     save_learning_plots(history, run_dir)
-
-    # Load best checkpoint and do val scatter
     ckpt = torch.load(best_path, map_location=device)
     model.load_state_dict(ckpt["model_state"])
     y_pred, y_true = predict(model, val_loader, device)
-    save_pred_scatter(y_true=y_true, y_pred=y_pred, run_dir=run_dir)
-
-    # Save run summary JSON
+    save_pred_scatter(y_true, y_pred, run_dir)
+    
+    # Final Metrics
     run_metrics = {
         "run_id": run_id,
-        "dataset": cfg.dataset_name,
         "n_samples": int(len(df)),
         "best_val_rmse": float(best_val_rmse),
         "best_epoch": int(best_epoch),
-        "seed": int(cfg.seed),
-        "device": str(device),
         "cfg": cfg.__dict__,
     }
-    run_metrics_path = os.path.join(run_dir, "run_metrics.json")
-    with open(run_metrics_path, "w") as f:
+    with open(os.path.join(run_dir, "run_metrics.json"), "w") as f:
         json.dump(run_metrics, f, indent=2)
-    print("Saved run metrics:", run_metrics_path)
-
-    print("Saved best checkpoint:", best_path)
-    print("Saved plots in:", run_dir)
+        
+    print("Done! Results saved to:", run_dir)
 
 
 if __name__ == "__main__":
     main()
+
+
+
