@@ -5,6 +5,9 @@ cache/
 # model artifacts
 *.pt
 *.pth
+*.npz
+*.csv
+*.json
 
 # python
 __pycache__/
