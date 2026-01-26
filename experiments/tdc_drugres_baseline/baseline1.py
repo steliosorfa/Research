@@ -371,53 +371,45 @@ def main() -> None:
     df = data.get_data()
     print(f"Total samples available: {len(df)}")
 
-    # 2. OPTIMIZED FEATURE SELECTION (Prevents "Killed" error)
-    print("Estimating gene variance using a random subset (to save RAM)...")
-    
-    # Take a random 10,000 samples to find the best genes
-    subset_indices = np.random.choice(len(df), size=10000, replace=False)
+    # Split (do this BEFORE feature selection to avoid leakage)
+    idx = np.arange(len(df))
+    idx_train, idx_val = train_test_split(
+        idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
+    )
+
+    print("Estimating gene variance using a random TRAIN subset (to save RAM)...")
+    train_subset_size = 10000
+    train_subset_size = min(train_subset_size, len(idx_train))
+
+    subset_indices = np.random.choice(idx_train, size=train_subset_size, replace=False)
     subset_expr = np.array(df.iloc[subset_indices]["Cell Line"].tolist(), dtype=np.float32)
-    
-    # Calculate variance on this small chunk
+
     gene_variances = np.var(subset_expr, axis=0)
-    
-    # Pick Top 1000 Genes
+
     TOP_K = 1000
     top_indices = np.argsort(gene_variances)[-TOP_K:]
     top_indices = np.sort(top_indices)
-    print(f"Selected top {TOP_K} genes based on variance.")
-    
-    # Free memory immediately
-    del subset_expr
-    import gc; gc.collect()
+    print(f"Selected top {TOP_K} genes based on TRAIN variance.")
 
-    # 3. Load the full dataset efficiently
-    print("Loading full dataset with selected genes...")
-    
-    # We load the raw list first (Pandas handles this fine)
     full_expr_list = df["Cell Line"].tolist()
-    
     n_samples = len(df)
-    # Create the final array with only 1000 columns (Small & Fast)
+
     cell_expr = np.zeros((n_samples, TOP_K), dtype=np.float32)
-    
-    # Process in batches to keep RAM usage flat
+
     batch_size = 10000
     for i in range(0, n_samples, batch_size):
         end = min(i + batch_size, n_samples)
-        # Convert only a small chunk to numpy
         batch_arr = np.array(full_expr_list[i:end], dtype=np.float32)
-        # Keep only the good genes
         cell_expr[i:end] = batch_arr[:, top_indices]
-        
+
         if i % 50000 == 0:
             print(f"Processed {i}/{n_samples} samples...")
-            
+
     print(f"Final Cell expr shape: {cell_expr.shape}")
-    
-    # Cleanup big list
-    del full_expr_list
-    gc.collect()
+
+    del subset_expr
+    import gc; gc.collect()
+
 
     # 4. Standard Setup continues...
     smiles = df["Drug"].astype(str).tolist()
@@ -427,10 +419,10 @@ def main() -> None:
     ecfp = build_or_load_ecfp_cache(cfg, smiles)
 
     # Split
-    idx = np.arange(len(df))
-    idx_train, idx_val = train_test_split(
-        idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
-    )
+    # idx = np.arange(len(df))
+    # idx_train, idx_val = train_test_split(
+      #  idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
+    #)
 
     # Standardization
     train_mean = cell_expr[idx_train].mean(axis=0, keepdims=True)
