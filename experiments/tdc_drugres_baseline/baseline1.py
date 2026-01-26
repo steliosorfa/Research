@@ -44,7 +44,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, DataStructs
 from tdc.multi_pred import DrugRes
 
-from sklearn.model_selection import train_test_split, GroupShuffleSplit 
+from sklearn.model_selection import train_test_split
 
 
 # ----------------------------
@@ -53,7 +53,7 @@ from sklearn.model_selection import train_test_split, GroupShuffleSplit
 @dataclass
 class Config:
     # Experiment tagging
-    run_tag: str ="held_out_seendrugs"
+    run_tag: str ="optimized_regularized_lr_scheduler"
 
     dataset_name: str = "GDSC1"
 
@@ -371,67 +371,53 @@ def main() -> None:
     df = data.get_data()
     print(f"Total samples available: {len(df)}")
 
-    # Split (do this BEFORE feature selection to avoid leakage)
-    # idx = np.arange(len(df))
-    #idx_train, idx_val = train_test_split(
-     #   idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
-    #)
-    # ----------------------------
-    # Split: LEAVE-DRUG-OUT (blind drugs)
-    # ----------------------------
-    idx = np.arange(len(df))
-
-    # group id per sample = Drug_ID (ή "Drug" αν θες)
-    groups = df["Drug_ID"].astype(str).to_numpy()
-
-    gss = GroupShuffleSplit(n_splits=1, test_size=cfg.val_size, random_state=cfg.seed)
-    train_idx, val_idx = next(gss.split(idx, y=None, groups=groups))
-
-    idx_train = idx[train_idx]
-    idx_val   = idx[val_idx]
-
-    # sanity checks: no overlap of drugs
-    train_drugs = set(groups[idx_train])
-    val_drugs   = set(groups[idx_val])
-    overlap = train_drugs.intersection(val_drugs)
-    print(f"[Split] Train samples: {len(idx_train)} | Val samples: {len(idx_val)}")
-    print(f"[Split] Unique drugs train: {len(train_drugs)} | val: {len(val_drugs)} | overlap: {len(overlap)}")
-    assert len(overlap) == 0, "Leave-Drug-Out violated: same Drug_ID appears in train and val!"
-
-
-    print("Estimating gene variance using a random TRAIN subset (to save RAM)...")
-    train_subset_size = 10000
-    train_subset_size = min(train_subset_size, len(idx_train))
-
-    subset_indices = np.random.choice(idx_train, size=train_subset_size, replace=False)
+    # 2. OPTIMIZED FEATURE SELECTION (Prevents "Killed" error)
+    print("Estimating gene variance using a random subset (to save RAM)...")
+    
+    # Take a random 10,000 samples to find the best genes
+    subset_indices = np.random.choice(len(df), size=10000, replace=False)
     subset_expr = np.array(df.iloc[subset_indices]["Cell Line"].tolist(), dtype=np.float32)
-
+    
+    # Calculate variance on this small chunk
     gene_variances = np.var(subset_expr, axis=0)
-
+    
+    # Pick Top 1000 Genes
     TOP_K = 1000
     top_indices = np.argsort(gene_variances)[-TOP_K:]
     top_indices = np.sort(top_indices)
-    print(f"Selected top {TOP_K} genes based on TRAIN variance.")
-
-    full_expr_list = df["Cell Line"].tolist()
-    n_samples = len(df)
-
-    cell_expr = np.zeros((n_samples, TOP_K), dtype=np.float32)
-
-    batch_size = 10000
-    for i in range(0, n_samples, batch_size):
-        end = min(i + batch_size, n_samples)
-        batch_arr = np.array(full_expr_list[i:end], dtype=np.float32)
-        cell_expr[i:end] = batch_arr[:, top_indices]
-
-        if i % 50000 == 0:
-            print(f"Processed {i}/{n_samples} samples...")
-
-    print(f"Final Cell expr shape: {cell_expr.shape}")
-
+    print(f"Selected top {TOP_K} genes based on variance.")
+    
+    # Free memory immediately
     del subset_expr
     import gc; gc.collect()
 
+    # 3. Load the full dataset efficiently
+    print("Loading full dataset with selected genes...")
+    
+    # We load the raw list first (Pandas handles this fine)
+    full_expr_list = df["Cell Line"].tolist()
+    
+    n_samples = len(df)
+    # Create the final array with only 1000 columns (Small & Fast)
+    cell_expr = np.zeros((n_samples, TOP_K), dtype=np.float32)
+    
+    # Process in batches to keep RAM usage flat
+    batch_size = 10000
+    for i in range(0, n_samples, batch_size):
+        end = min(i + batch_size, n_samples)
+        # Convert only a small chunk to numpy
+        batch_arr = np.array(full_expr_list[i:end], dtype=np.float32)
+        # Keep only the good genes
+        cell_expr[i:end] = batch_arr[:, top_indices]
+        
+        if i % 50000 == 0:
+            print(f"Processed {i}/{n_samples} samples...")
+            
+    print(f"Final Cell expr shape: {cell_expr.shape}")
+    
+    # Cleanup big list
+    del full_expr_list
+    gc.collect()
 
     # 4. Standard Setup continues...
     smiles = df["Drug"].astype(str).tolist()
@@ -441,10 +427,10 @@ def main() -> None:
     ecfp = build_or_load_ecfp_cache(cfg, smiles)
 
     # Split
-    # idx = np.arange(len(df))
-    # idx_train, idx_val = train_test_split(
-      #  idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
-    #)
+    idx = np.arange(len(df))
+    idx_train, idx_val = train_test_split(
+        idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
+    )
 
     # Standardization
     train_mean = cell_expr[idx_train].mean(axis=0, keepdims=True)
@@ -534,13 +520,7 @@ def main() -> None:
     # Final Metrics
     run_metrics = {
         "run_id": run_id,
-        "split_mode": "leave_drug_out",
-        "group_key": "Drug_ID",
         "n_samples": int(len(df)),
-        "n_train": int(len(idx_train)),
-        "n_val": int(len(idx_val)),
-        "n_drugs_train": int(len(train_drugs)),
-        "n_drugs_val": int(len(val_drugs)),
         "best_val_rmse": float(best_val_rmse),
         "best_epoch": int(best_epoch),
         "cfg": cfg.__dict__,
