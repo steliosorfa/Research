@@ -45,6 +45,8 @@ from rdkit.Chem import AllChem, DataStructs
 from tdc.multi_pred import DrugRes
 
 from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit
+
 
 # ----------------------------
 # YAML Saver 
@@ -65,13 +67,14 @@ def save_cfg_yaml(cfg_dict: dict, path: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
+
 # ----------------------------
 # Config
 # ----------------------------
 @dataclass
 class Config:
     # Experiment tagging
-    run_tag: str ="optimized_regularized_lr_scheduler"
+    run_tag: str ="helddrugout"
 
     dataset_name: str = "GDSC1"
 
@@ -389,15 +392,31 @@ def main() -> None:
     df = data.get_data()
     print(f"Total samples available: {len(df)}")
 
+    print("Columns:", df.columns.tolist())
+    print("n_samples:", len(df))
+    print("n_unique Drug:", df["Drug"].nunique())
+    if "Drug_ID" in df.columns:
+        print("n_unique Drug_ID:", df["Drug_ID"].nunique())
+
+
     # ----------------------------
-    # Split FIRST (avoid leakage)
+    # LEAVE-DRUG-OUT split (blind drugs)
     # ----------------------------
     idx = np.arange(len(df))
-    idx_train, idx_val = train_test_split(
-        idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
-    )
+    groups = df["Drug_ID"].astype(str).to_numpy()  # αν δεν υπάρχει, χρησιμοποιω df["Drug"]
 
+    gss = GroupShuffleSplit(n_splits=1, test_size=cfg.val_size, random_state=cfg.seed)
+    train_idx, val_idx = next(gss.split(idx, groups=groups))
+
+    idx_train = idx[train_idx]
+    idx_val = idx[val_idx]
+
+    train_drugs = set(groups[idx_train])
+    val_drugs = set(groups[idx_val])
+    overlap = train_drugs.intersection(val_drugs)
     print(f"[Split] Train samples: {len(idx_train)} | Val samples: {len(idx_val)}")
+    print(f"[Split] Unique drugs train: {len(train_drugs)} | val: {len(val_drugs)} | overlap: {len(overlap)}")
+    assert len(overlap) == 0 , "Leave-Drug-Out violated: same Drug_ID appears in train and val!"
 
     # ----------------------------
     # Variance-based gene selection on TRAIN only
@@ -456,10 +475,10 @@ def main() -> None:
     ecfp = build_or_load_ecfp_cache(cfg, smiles)
 
     # Split
-    idx = np.arange(len(df))
-    idx_train, idx_val = train_test_split(
-        idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
-    )
+    # idx = np.arange(len(df))
+    # idx_train, idx_val = train_test_split(
+        #idx, test_size=cfg.val_size, random_state=cfg.seed, shuffle=True
+    #)
 
     # Standardization
     train_mean = cell_expr[idx_train].mean(axis=0, keepdims=True)
@@ -549,11 +568,8 @@ def main() -> None:
 # -------------------------------------------------------
 # Final Metrics & Config (Expanded for Git)
 # -------------------------------------------------------
+    # Calculate best Pearson from history (since we tracked it)
     best_val_pearson = history[best_epoch - 1]["val_pearson"]
-    
-    # Calculate drug sets for logging
-    train_drugs_set = set(df.iloc[idx_train]["Drug"])
-    val_drugs_set = set(df.iloc[idx_val]["Drug"])
 
     metrics = {
         "run_id": run_id,
@@ -562,10 +578,6 @@ def main() -> None:
         "n_train": int(len(idx_train)),
         "n_val": int(len(idx_val)),
         "n_unique_drugs": int(df["Drug"].nunique()),
-        # These will show heavy overlap in the random split (which is expected)
-        "n_train_drugs": int(len(train_drugs_set)),
-        "n_val_drugs": int(len(val_drugs_set)),
-        "n_overlap_drugs": int(len(train_drugs_set.intersection(val_drugs_set))),
         "best_epoch": int(best_epoch),
         "best_val_rmse": float(best_val_rmse),
         "best_val_pearson": float(best_val_pearson),
