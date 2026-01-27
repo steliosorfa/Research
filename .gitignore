@@ -1,5 +1,9 @@
 # experiment outputs
 results/
+!results/**/
+!results/**/*.png
+!results/**/metrics.json
+!results/**/cfg.yaml
 cache/
 
 # but keep png plots anywhere under results
