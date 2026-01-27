@@ -10,7 +10,7 @@ cache/
 *.pth
 *.npz
 *.csv
-*.json
+
 
 # python
 __pycache__/
