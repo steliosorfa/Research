@@ -1,0 +1,11 @@
+{
+  "run_id": "helddrugout_20260127_134020",
+  "split_type": "random_mixed",
+  "n_samples": 177310,
+  "n_train": 158275,
+  "n_val": 19035,
+  "n_unique_drugs": 208,
+  "best_epoch": 5,
+  "best_val_rmse": 1.7430810928344727,
+  "best_val_pearson": 0.5987681815583664
+}
