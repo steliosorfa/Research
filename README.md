@@ -1,2 +1,3 @@
 # Resarch
-Πειράματα, αποτελέσματα και σημειώσεις για την πτυχιακή μου έρευνα στο Machine Learning.
+Machine learning for prediction of drug response for drug -
+cell pairs
