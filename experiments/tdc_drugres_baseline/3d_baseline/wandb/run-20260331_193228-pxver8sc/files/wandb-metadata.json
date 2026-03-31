@@ -1,0 +1,28 @@
+{
+  "os": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "python": "CPython 3.10.12",
+  "startedAt": "2026-03-31T16:32:28.367802Z",
+  "program": "/mnt/c/Users/steliosorfa/Desktop/Courses/ΠΤΥΧΙΑΚΗ/Research/experiments/tdc_drugres_baseline/3d_baseline/3d_baseline.py",
+  "codePath": "experiments/tdc_drugres_baseline/3d_baseline/3d_baseline.py",
+  "codePathLocal": "3d_baseline.py",
+  "git": {
+    "remote": "https://github.com/steliosorfa/Research.git",
+    "commit": "d30586210750e7fe628e4682a98aae662d202207"
+  },
+  "email": "steliosorfa4@gmail.com",
+  "root": "/mnt/c/Users/steliosorfa/Desktop/Courses/ΠΤΥΧΙΑΚΗ/Research/experiments/tdc_drugres_baseline/3d_baseline",
+  "host": "SteliosDesktop",
+  "executable": "/home/stelios/anaconda3/envs/drugres/bin/python",
+  "cpu_count": 8,
+  "cpu_count_logical": 16,
+  "disk": {
+    "/": {
+      "total": "1081101176832",
+      "used": "59935039488"
+    }
+  },
+  "memory": {
+    "total": "16563499008"
+  },
+  "writerId": "z6p7y59t5iwmjj288c9zjxdb6z0l37fi"
+}

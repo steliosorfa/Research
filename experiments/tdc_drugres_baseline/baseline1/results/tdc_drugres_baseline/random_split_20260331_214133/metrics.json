@@ -1,0 +1,11 @@
+{
+  "run_id": "random_split_20260331_214133",
+  "split_type": "random_split",
+  "n_samples": 177310,
+  "n_train": 159579,
+  "n_val": 17731,
+  "n_unique_drugs": 208,
+  "best_epoch": 50,
+  "best_val_rmse": 0.9555568695068359,
+  "best_val_pearson": 0.9362303224327903
+}

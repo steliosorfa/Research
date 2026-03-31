@@ -1,0 +1,95 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            z6p7y59t5iwmjj288c9zjxdb6z0l37fi:
+                codePath: experiments/tdc_drugres_baseline/3d_baseline/3d_baseline.py
+                codePathLocal: 3d_baseline.py
+                cpu_count: 8
+                cpu_count_logical: 16
+                disk:
+                    /:
+                        total: "1081101176832"
+                        used: "59935039488"
+                email: steliosorfa4@gmail.com
+                executable: /home/stelios/anaconda3/envs/drugres/bin/python
+                git:
+                    commit: d30586210750e7fe628e4682a98aae662d202207
+                    remote: https://github.com/steliosorfa/Research.git
+                host: SteliosDesktop
+                memory:
+                    total: "16563499008"
+                os: Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35
+                program: /mnt/c/Users/steliosorfa/Desktop/Courses/ΠΤΥΧΙΑΚΗ/Research/experiments/tdc_drugres_baseline/3d_baseline/3d_baseline.py
+                python: CPython 3.10.12
+                root: /mnt/c/Users/steliosorfa/Desktop/Courses/ΠΤΥΧΙΑΚΗ/Research/experiments/tdc_drugres_baseline/3d_baseline
+                startedAt: "2026-03-31T16:32:28.367802Z"
+                writerId: z6p7y59t5iwmjj288c9zjxdb6z0l37fi
+        m: []
+        python_version: 3.10.12
+        t:
+            "1":
+                - 1
+                - 5
+                - 11
+                - 49
+                - 53
+                - 77
+            "2":
+                - 1
+                - 5
+                - 11
+                - 49
+                - 53
+                - 77
+            "3":
+                - 2
+                - 13
+                - 16
+            "4": 3.10.12
+            "5": 0.25.1
+            "6": 4.50.3
+            "12": 0.25.1
+            "13": linux-x86_64
+batch_size:
+    value: 128
+best_ckpt:
+    value: best_model.pt
+cache_dir:
+    value: cache
+cell_hidden:
+    value: 512
+dataset_name:
+    value: GDSC1
+device:
+    value: cpu
+dropout:
+    value: 0.3
+drug_hidden:
+    value: 256
+epochs:
+    value: 80
+graph_cache_file:
+    value: gdsc1_geognn_3d_v1.pt
+lr:
+    value: 0.0001
+min_delta:
+    value: 1e-05
+num_workers:
+    value: 4
+patience:
+    value: 20
+results_dir:
+    value: results/tdc_drugres_geognn/3d_baseline
+run_tag:
+    value: geognn_3d_ldo_tuned_v1_seed44
+seed:
+    value: 44
+subset_n:
+    value: null
+val_size:
+    value: 0.1
+weight_decay:
+    value: 0.0001
+z_dim:
+    value: 128

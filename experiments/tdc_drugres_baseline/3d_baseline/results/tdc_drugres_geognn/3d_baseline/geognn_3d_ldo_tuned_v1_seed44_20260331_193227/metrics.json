@@ -1,0 +1,15 @@
+{
+  "run_id": "geognn_3d_ldo_tuned_v1_seed44_20260331_193227",
+  "split_type": "leave_drug_out",
+  "n_samples": 176380,
+  "n_train": 157750,
+  "n_val": 18630,
+  "n_unique_drugs": 207,
+  "n_train_drugs": 186,
+  "n_val_drugs": 21,
+  "n_overlap_drugs": 0,
+  "best_epoch": 19,
+  "best_val_rmse_scaled": 0.08761821687221527,
+  "best_val_rmse_lnIC50": 1.9532257318496704,
+  "best_val_pearson": 0.7209444609760705
+}
