@@ -1,1 +1,0 @@
-{"learning_rate":1.5625e-06,"val_RMSE_lnIC50":2.105684518814087,"_runtime":6752,"val_RMSE_scaled":0.094457246363163,"_timestamp":1.7749821017454722e+09,"val_Pearson":0.7226059257376384,"epoch":39,"_wandb":{"runtime":6752},"_step":38,"train_loss":0.0025315159561316203,"val_loss":0.008922171640503298}
