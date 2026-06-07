@@ -24,7 +24,7 @@ from sklearn.model_selection import train_test_split, GroupShuffleSplit
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, global_max_pool
+from torch_geometric.nn import GINEConv, global_mean_pool as gap, global_max_pool as gmp
 from torch_geometric.nn import BatchNorm
 
 
@@ -54,7 +54,7 @@ def save_cfg_yaml(cfg_dict: dict, path: str) -> None:
 # ══════════════════════════════════════════
 @dataclass
 class Config:
-    run_tag: str = "baseline2_gcn"
+    run_tag: str = "final_3d_geognn_tuned"
     dataset_name: str = "GDSC1"
 
     # ── Split strategy ──────────────────────────────────────────────
@@ -67,27 +67,26 @@ class Config:
 
     # Model dims
     z_dim: int = 128
-    drug_hidden: int = 64
+    drug_hidden: int = 256
     cell_hidden: int = 512
-    dropout: float = 0.6
+    dropout: float = 0.2 # ΝΕΟ
 
     # Training — unified across all models
     seed: int = 44
-    batch_size: int = 128
-    lr: float = 5e-5
-    weight_decay: float = 1e-2
+    batch_size: int = 128 #ΝΕΟ
+    lr: float = 1e-4 #ΝΕΟ
+    weight_decay: float = 1e-4
     epochs: int = 80
     patience: int = 20
-    min_delta: float = 1e-4
+    min_delta: float = 1e-5
 
     num_workers: int = 4
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
-
     subset_n: int | None = None
 
     # Paths — set dynamically in main() based on __file__
     cache_dir: str = ""
-    graph_cache_file: str = "gdsc1_graphs_gcn_node10.pt"
+    graph_cache_file: str = "gdsc1_geognn_3d_v1.pt"
     results_dir: str = ""
     best_ckpt: str = "best_model.pt"
 
@@ -104,16 +103,34 @@ def seed_everything(seed: int) -> None:
 
 
 # ----------------------------
-# Featurizer: SMILES -> graph
+# Featurizer: SMILES -> 3D graph
 # ----------------------------
-def smiles_to_graph(smiles: str) -> Data:
+def smiles_to_graph_3d(smiles: str):
+    """Returns (drug_atom, drug_bond) — two PyG Data objects."""
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
-        return None
+        return None, None
 
+    try:
+        new_mol = Chem.AddHs(mol)
+        cids    = AllChem.EmbedMultipleConfs(new_mol, numConfs=10)
+        res     = AllChem.MMFFOptimizeMoleculeConfs(new_mol)
+        index   = np.argmin([x[1] for x in res])
+        new_mol = Chem.RemoveHs(new_mol)
+        conf    = new_mol.GetConformer(id=int(index))
+        atom_poses = np.array([list(conf.GetAtomPosition(i))
+                                for i in range(new_mol.GetNumAtoms())], dtype=np.float32)
+    except:
+        AllChem.Compute2DCoords(mol)
+        conf    = mol.GetConformer()
+        new_mol = mol
+        atom_poses = np.array([list(conf.GetAtomPosition(i))
+                                for i in range(mol.GetNumAtoms())], dtype=np.float32)
+
+    # Atom features (A2A nodes)
     atom_features = []
-    for atom in mol.GetAtoms():
-        features = [
+    for atom in new_mol.GetAtoms():
+        atom_features.append([
             float(atom.GetAtomicNum()),
             float(atom.GetDegree()),
             float(atom.GetFormalCharge()),
@@ -122,89 +139,149 @@ def smiles_to_graph(smiles: str) -> Data:
             float(atom.GetIsAromatic()),
             float(atom.GetTotalNumHs()),
             float(atom.IsInRing()),
-            float(atom.GetImplicitValence()),
-            float(atom.GetTotalValence()),
-        ]
-        atom_features.append(features)
+            atom.GetMass(),
+        ])
+    x_atom = torch.tensor(atom_features, dtype=torch.float32)
 
-    x = torch.tensor(atom_features, dtype=torch.float32)
-
+    # Bond features + A2A edges
     edges_list = []
     edge_attrs = []
 
-    for bond in mol.GetBonds():
-        i = bond.GetBeginAtomIdx()
-        j = bond.GetEndAtomIdx()
+    for bond in new_mol.GetBonds():
+        i     = bond.GetBeginAtomIdx()
+        j     = bond.GetEndAtomIdx()
+        b_len = float(np.linalg.norm(atom_poses[i] - atom_poses[j]))
         b_feat = [
             float(bond.GetIsAromatic()),
             float(bond.GetIsConjugated()),
+            float(str(bond.GetBondType()) == 'SINGLE'),
+            float(str(bond.GetBondType()) == 'DOUBLE'),
+            float(str(bond.GetBondType()) == 'AROMATIC'),
+            b_len,
         ]
         edges_list.append([i, j]); edge_attrs.append(b_feat)
         edges_list.append([j, i]); edge_attrs.append(b_feat)
 
-    if len(edges_list) > 0:
-        edge_index = torch.tensor(edges_list, dtype=torch.long).t().contiguous()
-        edge_attr  = torch.tensor(edge_attrs, dtype=torch.float32)
-    else:
-        edge_index = torch.empty((2, 0), dtype=torch.long)
-        edge_attr  = torch.empty((0, 2), dtype=torch.float32)
+    if len(edges_list) == 0:
+        return None, None
 
-    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+    edge_index_atom = torch.tensor(edges_list, dtype=torch.long).t().contiguous()
+    edge_attr_atom  = torch.tensor(edge_attrs, dtype=torch.float32)
+
+    # B2B graph with bond angles
+    def get_angle(vec1, vec2):
+        n1, n2 = np.linalg.norm(vec1), np.linalg.norm(vec2)
+        if n1 == 0 or n2 == 0:
+            return 0.0
+        return float(np.arccos(np.clip(
+            np.dot(vec1 / (n1 + 1e-5), vec2 / (n2 + 1e-5)), -1.0, 1.0)))
+
+    edge_pairs  = edge_index_atom.t().numpy()
+    super_edges = []
+    bond_angles = []
+
+    for bond_idx, (src, dst) in enumerate(edge_pairs):
+        neighbor_bond_ids = np.where(edge_pairs[:, 1] == src)[0]
+        for nb_idx in neighbor_bond_ids:
+            if nb_idx == bond_idx:
+                continue
+            nb_src, nb_dst = edge_pairs[nb_idx]
+            super_edges.append([nb_idx, bond_idx])
+            vec1 = atom_poses[src]   - atom_poses[dst]
+            vec2 = atom_poses[nb_src] - atom_poses[nb_dst]
+            bond_angles.append(get_angle(vec1, vec2))
+
+    if len(super_edges) == 0:
+        return None, None
+
+    edge_index_bond = torch.tensor(super_edges, dtype=torch.long).t().contiguous()
+    edge_attr_bond  = torch.tensor(bond_angles, dtype=torch.float32).unsqueeze(1)
+    x_bond          = edge_attr_atom   # bond features as B2B node features
+
+    drug_atom = Data(x=x_atom, edge_index=edge_index_atom, edge_attr=edge_attr_atom)
+    drug_bond = Data(x=x_bond, edge_index=edge_index_bond, edge_attr=edge_attr_bond)
+    return drug_atom, drug_bond
 
 
 # ----------------------------
 # Dataset
 # ----------------------------
 class DrugResGraphDataset(Dataset):
-    def __init__(self, drug_graphs: List[Data], cell_expr: np.ndarray, y: np.ndarray):
-        self.drug_graphs = drug_graphs
+    def __init__(self, atom_graphs, bond_graphs, cell_expr, y):
+        self.atom_graphs = atom_graphs
+        self.bond_graphs = bond_graphs
         self.cell_expr   = cell_expr
         self.y           = y
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.y)
 
-    def __getitem__(self, idx: int):
-        graph  = self.drug_graphs[idx]
-        x_cell = torch.from_numpy(self.cell_expr[idx])
-        y      = torch.tensor(self.y[idx], dtype=torch.float32).view(1)
-        return graph, x_cell, y
+    def __getitem__(self, idx):
+        return (self.atom_graphs[idx], self.bond_graphs[idx],
+                torch.from_numpy(self.cell_expr[idx]),
+                torch.tensor(self.y[idx], dtype=torch.float32).view(1))
 
 
 # ----------------------------
-# Drug Encoder (GCN)
+# Geometric Drug Encoder (A2A + B2B GINE)
 # ----------------------------
-class DrugGNNEncoder(torch.nn.Module):
-    def __init__(self, node_feat_dim: int, hidden_dim: int, z_dim: int, dropout: float):
+class DrugGeoEncoder(nn.Module):
+    def __init__(self, atom_feat_dim: int, bond_feat_dim: int,
+                 hidden_dim: int, z_dim: int, dropout: float):
         super().__init__()
-        self.conv1 = GCNConv(node_feat_dim, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim,    hidden_dim * 2)
-        self.conv3 = GCNConv(hidden_dim * 2, hidden_dim * 4)
+
+        # A2A stream
+        self.atom_proj   = nn.Linear(atom_feat_dim, hidden_dim)
+        self.edge_proj_a = nn.Linear(bond_feat_dim, hidden_dim)
+
+        self.gin1 = GINEConv(nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)))
+        self.gin2 = GINEConv(nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)))
 
         self.bn1 = BatchNorm(hidden_dim)
-        self.bn2 = BatchNorm(hidden_dim * 2)
-        self.bn3 = BatchNorm(hidden_dim * 4)
+        self.bn2 = BatchNorm(hidden_dim)
 
-        self.fc_g1   = nn.Linear(hidden_dim * 4, 512)
-        self.fc_g2   = nn.Linear(512, z_dim)
-        self.dropout = nn.Dropout(dropout)
+        # B2B stream
+        self.bond_node_proj = nn.Linear(bond_feat_dim, hidden_dim)
+        self.edge_proj_b    = nn.Linear(1, hidden_dim)
 
-    def forward(self, drug_graph):
-        x, edge_index, batch = (
-            drug_graph.x, drug_graph.edge_index, drug_graph.batch)
+        self.gin_b1 = GINEConv(nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)))
+        self.gin_b2 = GINEConv(nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)))
 
-        x = self.dropout(F.relu(self.bn1(self.conv1(x, edge_index))))
-        x = F.relu(self.bn2(self.conv2(x, edge_index)))
-        x = F.relu(self.bn3(self.conv3(x, edge_index)))
+        self.bn_b  = BatchNorm(hidden_dim)
+        self.bn_b2 = BatchNorm(hidden_dim)
 
-        x      = global_max_pool(x, batch)
-        x      = self.dropout(F.relu(self.fc_g1(x)))
-        z_drug = self.dropout(self.fc_g2(x))
-        return z_drug
+        self.dropout  = nn.Dropout(dropout)
+        self.out_proj = nn.Linear(hidden_dim * 2, z_dim)
+
+    def forward(self, atom_graph, bond_graph):
+        # A2A
+        xa = self.atom_proj(atom_graph.x)
+        ea = self.edge_proj_a(atom_graph.edge_attr)
+        xa = self.dropout(F.relu(self.bn1(self.gin1(xa, atom_graph.edge_index, ea))))
+        xa = self.dropout(F.relu(self.bn2(self.gin2(xa, atom_graph.edge_index, ea))))
+        h_atom = gmp(xa, atom_graph.batch)
+
+        # B2B
+        xb = self.bond_node_proj(bond_graph.x)
+        eb = self.edge_proj_b(bond_graph.edge_attr)
+        xb = self.dropout(F.relu(self.bn_b(self.gin_b1(xb, bond_graph.edge_index, eb))))
+        xb = self.dropout(F.relu(self.bn_b2(self.gin_b2(xb, bond_graph.edge_index, eb))))
+        h_bond = gmp(xb, bond_graph.batch)
+
+        h_geo = F.relu(self.out_proj(torch.cat([h_atom, h_bond], dim=1)))
+        return h_geo
 
 
 # ----------------------------
-# Cell Encoder (MLP)
+# Model
 # ----------------------------
 class MLP(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, dropout: float):
@@ -225,14 +302,12 @@ class MLP(nn.Module):
         return self.net(x)
 
 
-# ----------------------------
-# Full Model
-# ----------------------------
 class DrugResponsePredictor(nn.Module):
-    def __init__(self, node_feat_dim: int, cell_in: int, cfg: Config):
+    def __init__(self, cell_in: int, cfg: Config):
         super().__init__()
-        self.drug_gnn = DrugGNNEncoder(node_feat_dim, cfg.drug_hidden,
-                                       cfg.z_dim, cfg.dropout)
+        self.drug_gnn = DrugGeoEncoder(
+            atom_feat_dim=9, bond_feat_dim=6,
+            hidden_dim=cfg.drug_hidden, z_dim=cfg.z_dim, dropout=cfg.dropout)
         self.cell_mlp = MLP(cell_in, cfg.cell_hidden, cfg.z_dim, cfg.dropout)
         self.head = nn.Sequential(
             nn.Linear(cfg.z_dim * 2, cfg.z_dim),
@@ -246,8 +321,8 @@ class DrugResponsePredictor(nn.Module):
             # ← No Sigmoid: direct ln(IC50) prediction
         )
 
-    def forward(self, drug_graph, x_cell):
-        z_drug = self.drug_gnn(drug_graph)
+    def forward(self, atom_graph, bond_graph, x_cell):
+        z_drug = self.drug_gnn(atom_graph, bond_graph)
         z_cell = self.cell_mlp(x_cell)
         return self.head(torch.cat([z_drug, z_cell], dim=1))
 
@@ -272,7 +347,7 @@ def pearsonr(pred: torch.Tensor, target: torch.Tensor) -> float:
 # ----------------------------
 # Graph cache
 # ----------------------------
-def build_or_load_graph_cache(cfg: Config, smiles_list: List[str]) -> List[Data]:
+def build_or_load_graph_cache(cfg: Config, smiles_list: List[str]):
     os.makedirs(cfg.cache_dir, exist_ok=True)
     cache_path = os.path.join(cfg.cache_dir, cfg.graph_cache_file)
 
@@ -280,19 +355,34 @@ def build_or_load_graph_cache(cfg: Config, smiles_list: List[str]) -> List[Data]
         cache_dict = torch.load(cache_path, map_location="cpu", weights_only=False)
         if cache_dict["meta"].get("n") == len(smiles_list):
             print(f"Loaded Graph cache: {cache_path}")
-            return cache_dict["graphs"]
-        print("Cache metadata mismatch -> rebuilding...")
+            return cache_dict["atom_graphs"], cache_dict["bond_graphs"]
+        print("Cache mismatch -> rebuilding...")
 
-    print("Building Graph cache (CPU)...")
-    graphs = []
-    for i, smi in enumerate(smiles_list):
-        graphs.append(smiles_to_graph(smi))
-        if (i + 1) % 5000 == 0:
-            print(f"  featurized {i+1}/{len(smiles_list)}")
+    print("Building 3D Graph cache...")
+    unique_smiles  = list(set(smiles_list))
+    print(f"Found {len(unique_smiles)} unique drugs. Generating 3D conformers...")
+    smiles_to_graphs = {}
+    failed = 0
 
-    torch.save({"graphs": graphs, "meta": {"n": len(smiles_list)}}, cache_path)
-    print(f"Saved Graph cache: {cache_path}")
-    return graphs
+    for i, smi in enumerate(unique_smiles):
+        da, db = smiles_to_graph_3d(smi)
+        smiles_to_graphs[smi] = (da, db)
+        if da is None:
+            failed += 1
+        if (i + 1) % 10 == 0:
+            print(f"  {i+1}/{len(unique_smiles)} | failed: {failed}")
+
+    print("Mapping 3D graphs to full dataset...")
+    atom_graphs, bond_graphs = [], []
+    for smi in smiles_list:
+        da, db = smiles_to_graphs[smi]
+        atom_graphs.append(da)
+        bond_graphs.append(db)
+
+    torch.save({"atom_graphs": atom_graphs, "bond_graphs": bond_graphs,
+                "meta": {"n": len(smiles_list)}}, cache_path)
+    print(f"Saved cache: {cache_path}")
+    return atom_graphs, bond_graphs
 
 
 # ----------------------------
@@ -342,12 +432,13 @@ def make_splits(df, cfg: Config):
 def train_one_epoch(model, loader, opt, loss_fn, device) -> float:
     model.train()
     total, n = 0.0, 0
-    for drug_graph, x_cell, y in loader:
-        drug_graph = drug_graph.to(device)
+    for atom_graph, bond_graph, x_cell, y in loader:
+        atom_graph = atom_graph.to(device)
+        bond_graph = bond_graph.to(device)
         x_cell     = x_cell.to(device)
         y          = y.to(device)
         opt.zero_grad(set_to_none=True)
-        loss = loss_fn(model(drug_graph, x_cell), y)
+        loss = loss_fn(model(atom_graph, bond_graph, x_cell), y)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         opt.step()
@@ -360,11 +451,12 @@ def eval_epoch(model, loader, loss_fn, device):
     model.eval()
     total, n = 0.0, 0
     preds, targets = [], []
-    for drug_graph, x_cell, y in loader:
-        drug_graph = drug_graph.to(device)
+    for atom_graph, bond_graph, x_cell, y in loader:
+        atom_graph = atom_graph.to(device)
+        bond_graph = bond_graph.to(device)
         x_cell     = x_cell.to(device)
         y          = y.to(device)
-        yh = model(drug_graph, x_cell)
+        yh = model(atom_graph, bond_graph, x_cell)
         total += loss_fn(yh, y).item() * y.size(0); n += y.size(0)
         preds.append(yh.cpu()); targets.append(y.cpu())
     pred   = torch.cat(preds)
@@ -376,9 +468,10 @@ def eval_epoch(model, loader, loss_fn, device):
 def predict(model, loader, device):
     model.eval()
     preds, targets = [], []
-    for drug_graph, x_cell, y in loader:
-        preds.append(model(drug_graph.to(device), x_cell.to(device)).cpu().view(-1))
-        targets.append(y.view(-1))
+    for atom_graph, bond_graph, x_cell, y in loader:
+        yh = model(atom_graph.to(device), bond_graph.to(device),
+                   x_cell.to(device)).cpu().view(-1)
+        preds.append(yh); targets.append(y.view(-1))
     return torch.cat(preds).numpy(), torch.cat(targets).numpy()
 
 
@@ -424,14 +517,14 @@ def main() -> None:
     # ──────────────────────────────────────────────────────────────
 
     # ── Absolute paths relative to project root ────────────────────
-    # Layout: <project_root>/src/baseline_2/baseline2_gcn.py
-    #         <project_root>/results/baseline_2/<run_id>/
+    # Layout: <project_root>/src/3d_baseline/3d_baseline.py
+    #         <project_root>/results/3d_baseline/<run_id>/
     #         <project_root>/cache/
     _this_file = os.path.abspath(__file__)
     _proj_root = os.path.dirname(os.path.dirname(os.path.dirname(_this_file)))
 
     cfg.cache_dir   = os.path.join(_proj_root, "cache")
-    cfg.results_dir = os.path.join(_proj_root, "results", "baseline_2")
+    cfg.results_dir = os.path.join(_proj_root, "results", "3d_baseline")
     # ──────────────────────────────────────────────────────────────
 
     seed_everything(cfg.seed)
@@ -453,10 +546,23 @@ def main() -> None:
     df   = data.get_data()
     print(f"Total pairs: {len(df):,}")
 
-    # 2. Unified split
+    # 2. Filter drugs that fail 3D generation
+    print("Filtering drugs that cannot be parsed into 3D graphs...")
+    unique_smiles = df["Drug"].unique()
+    valid_smiles  = set()
+    for smi in unique_smiles:
+        da, db = smiles_to_graph_3d(smi)
+        if da is not None and db is not None:
+            valid_smiles.add(smi)
+    initial_len = len(df)
+    df = df[df["Drug"].isin(valid_smiles)].copy()
+    df.reset_index(drop=True, inplace=True)
+    print(f"Removed {initial_len - len(df)} pairs | Remaining: {len(df):,}")
+
+    # 3. Unified split
     train_idx, val_idx, test_idx = make_splits(df, cfg)
 
-    # 3. Gene selection on TRAIN only
+    # 4. Gene selection on TRAIN only
     subset_size = min(10_000, len(train_idx))
     subset_idx  = np.random.choice(train_idx, size=subset_size, replace=False)
     subset_expr = np.array(df.iloc[subset_idx]["Cell Line"].tolist(), dtype=np.float32)
@@ -465,7 +571,7 @@ def main() -> None:
     top_indices = np.sort(np.argsort(gene_var)[-TOP_K:])
     del subset_expr
 
-    # 4. Build cell_expr matrix
+    # 5. Build cell_expr matrix
     full_expr = df["Cell Line"].tolist()
     n         = len(df)
     cell_expr = np.zeros((n, TOP_K), dtype=np.float32)
@@ -476,23 +582,29 @@ def main() -> None:
     del full_expr
     import gc; gc.collect()
 
-    # 5. Drug graphs
-    smiles      = df["Drug"].astype(str).tolist()
-    drug_graphs = build_or_load_graph_cache(cfg, smiles)
-
-    # 6. Target — raw ln(IC50), no normalization
-    y = df["Y"].astype(float).to_numpy()
-
-    # 7. Cell expression standardisation (TRAIN stats only)
+    # 6. Cell standardisation (TRAIN stats only)
     tr_mean = cell_expr[train_idx].mean(axis=0, keepdims=True)
     tr_std  = cell_expr[train_idx].std(axis=0,  keepdims=True)
     tr_std[tr_std < 1e-8] = 1.0
     cell_expr = (cell_expr - tr_mean) / tr_std
 
-    # 8. Datasets & loaders
+    # Save preprocessing meta for cross-dataset evaluation
+    torch.save({"top_indices": top_indices, "train_mean": tr_mean, "train_std": tr_std},
+               os.path.join(run_dir, "gdsc1_preprocessing_meta.pt"))
+
+    # 7. Drug graphs (3D)
+    smiles = df["Drug"].astype(str).tolist()
+    atom_graphs, bond_graphs = build_or_load_graph_cache(cfg, smiles)
+
+    # 8. Target — raw ln(IC50), no normalization
+    y = df["Y"].astype(float).to_numpy()
+
+    # 9. Datasets & loaders
     def make_loader(idx, shuffle):
         ds = DrugResGraphDataset(
-            [drug_graphs[i] for i in idx], cell_expr[idx], y[idx])
+            [atom_graphs[i] for i in idx],
+            [bond_graphs[i] for i in idx],
+            cell_expr[idx], y[idx])
         return DataLoader(ds, batch_size=cfg.batch_size,
                           shuffle=shuffle, num_workers=cfg.num_workers)
 
@@ -500,13 +612,13 @@ def main() -> None:
     val_loader   = make_loader(val_idx,   shuffle=False)
     test_loader  = make_loader(test_idx,  shuffle=False)
 
-    # 9. Model
-    model   = DrugResponsePredictor(node_feat_dim=10, cell_in=TOP_K, cfg=cfg).to(device)
+    # 10. Model
+    model   = DrugResponsePredictor(cell_in=TOP_K, cfg=cfg).to(device)
     opt     = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     sched   = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=3)
     loss_fn = nn.MSELoss()
 
-    # 10. Training loop
+    # 11. Training loop
     best_val_rmse = float("inf")
     best_epoch    = -1
     history       = []
@@ -534,17 +646,17 @@ def main() -> None:
             if pat >= cfg.patience:
                 print(f"Early stopping at epoch {epoch}"); break
 
-    # 11. Save history & plots
+    # 12. Save history & plots
     with open(os.path.join(run_dir, "history.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(history[0].keys()))
         w.writeheader(); w.writerows(history)
     save_learning_plots(history, run_dir)
 
-    # 12. Load best checkpoint
+    # 13. Load best checkpoint
     ckpt = torch.load(best_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state"])
+    model.load_state_dict(ckpt["model_state"], strict=False)
 
-    # 13. Final evaluation on held-out TEST SET
+    # 14. Final evaluation on held-out TEST SET
     print("\n" + "="*60)
     print("FINAL EVALUATION ON HELD-OUT TEST SET")
     print("="*60)
@@ -555,8 +667,14 @@ def main() -> None:
 
     y_pred_test, y_true_test = predict(model, test_loader, device)
     save_pred_scatter(y_true_test, y_pred_test, run_dir, tag="test")
+    np.save(os.path.join(run_dir, "test_predictions.npy"), y_pred_test)
+    np.save(os.path.join(run_dir, "test_targets.npy"),     y_true_test)
 
-    # 14. Metrics
+    # Val scatter
+    y_pred_val, y_true_val = predict(model, val_loader, device)
+    save_pred_scatter(y_true_val, y_pred_val, run_dir, tag="val")
+
+    # 15. Metrics
     best_val_pearson = history[best_epoch - 1]["val_pearson"]
 
     group_col = ("Drug_ID"        if cfg.split_type == "blind_drug" and "Drug_ID" in df.columns
